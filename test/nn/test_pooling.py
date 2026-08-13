@@ -29,9 +29,7 @@ from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     largeTensorTest,
     onlyAccelerator,
-    onlyMPS,
     onlyNativeDeviceTypes,
-    onlyOn,
     TEST_WITH_ROCM,
 )
 from torch.testing._internal.common_dtype import floating_types_and
@@ -733,9 +731,8 @@ class TestPoolingNNDevice(NNTestCase):
         self.assertFalse(torch.isinf(out).any())
         self.assertFalse(torch.isnan(out).any())
 
-    @onlyOn(["cuda", "xpu"])
-    @largeTensorTest("10GB", device="cuda")
-    @largeTensorTest("10GB", device="xpu")
+    @onlyAccelerator
+    @largeTensorTest("10GB")
     def test_adaptive_avg_pool2d_backward_large_index_offsets(self, device):
         height = 32769
         width = 65536
@@ -1291,16 +1288,6 @@ torch.{device_type}.synchronize()
                     )
                 with cm:
                     module(input)
-
-    # Max: verify against unfold+amax. (Avg int is implementation-defined.)
-    @onlyMPS
-    @dtypes(torch.uint8, torch.int8, torch.short, torch.int, torch.long)
-    def test_adaptive_max_pool2d_int_input_mps(self, device, dtype):
-        torch.manual_seed(0)
-        inp = torch.randint(0, 16, (3, 4, 4), dtype=dtype, device=device)
-        out = nn.AdaptiveMaxPool2d((2, 2))(inp)
-        expected = inp.unfold(-2, 2, 2).unfold(-2, 2, 2).amax(dim=(-2, -1))
-        self.assertEqual(out, expected)
 
     @expectedFailureMPS  # TODO: fixme
     @gcIfJetson
@@ -2318,11 +2305,27 @@ torch.{device_type}.synchronize()
         F.adaptive_max_pool3d(imgs, (Od, Oh, Ow))
 
 
+class TestPoolingNNMpsOnly(NNTestCase):
+    hw_classification = HardwareClassification.MPS
+
+    # Max: verify against unfold+amax. (Avg int is implementation-defined.)
+    @dtypes(torch.uint8, torch.int8, torch.short, torch.int, torch.long)
+    def test_adaptive_max_pool2d_int_input_mps(self, device, dtype):
+        torch.manual_seed(0)
+        inp = torch.randint(0, 16, (3, 4, 4), dtype=dtype, device=device)
+        out = nn.AdaptiveMaxPool2d((2, 2))(inp)
+        expected = inp.unfold(-2, 2, 2).unfold(-2, 2, 2).amax(dim=(-2, -1))
+        self.assertEqual(out, expected)
+
+
 instantiate_device_type_tests(TestAvgPoolDevice, globals(), allow_xpu=True)
 instantiate_device_type_tests(
     TestPoolingNNDevice, globals(), allow_mps=True, allow_xpu=True
 )
 instantiate_parametrized_tests(TestPoolingNN)
+instantiate_device_type_tests(
+    TestPoolingNNMpsOnly, globals(), only_for="mps", allow_mps=True
+)
 
 if __name__ == "__main__":
     run_tests()
