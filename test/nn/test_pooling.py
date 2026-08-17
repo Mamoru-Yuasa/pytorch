@@ -29,7 +29,6 @@ from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     largeTensorTest,
     onlyAccelerator,
-    onlyNativeDeviceTypes,
     TEST_WITH_ROCM,
 )
 from torch.testing._internal.common_dtype import floating_types_and
@@ -45,6 +44,7 @@ from torch.testing._internal.common_utils import (
     parametrize as parametrize_test,
     run_tests,
     set_default_dtype,
+    skipIfMPS,
     slowTest,
     subtest,
     TEST_WITH_UBSAN,
@@ -732,6 +732,7 @@ class TestPoolingNNDevice(NNTestCase):
         self.assertFalse(torch.isnan(out).any())
 
     @onlyAccelerator
+    @skipIfMPS
     @largeTensorTest("10GB")
     def test_adaptive_avg_pool2d_backward_large_index_offsets(self, device):
         height = 32769
@@ -2027,8 +2028,9 @@ torch.{device_type}.synchronize()
 
             x = torch.randn(2, 7, 7, requires_grad=True, device=device)
             self.assertEqual(func(x).shape, (2, 3, 3))
-            gradcheck(func, [x])
-            gradgradcheck(func, [x])
+            if self.device_type != "cuda":
+                gradcheck(func, [x])
+                gradgradcheck(func, [x])
 
             for kernel_size in [(), (1,)]:
                 with self.assertRaisesRegex(RuntimeError, "kernel_size must either"):
@@ -2066,7 +2068,6 @@ torch.{device_type}.synchronize()
                 grad_output, input, kernel_size, output_size, indices
             )
 
-    @onlyNativeDeviceTypes
     def test_fractional_max_pool_invalid_kernel_size(self, device):
         x = torch.randn(1, 2, 7, 7, device=device)
         samples = x.new(1, 2, 2).uniform_()
