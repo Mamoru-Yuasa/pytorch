@@ -7,7 +7,10 @@
 namespace at {
 
 inline int64_t divup(int64_t x, int64_t y) {
-  return (x + y - 1) / y;
+  // Not (x + y - 1) / y: that overflows for large x or y and silently rounds
+  // down. Truncation already rounds a negative quotient up, so only a positive
+  // remainder needs the correction.
+  return x / y + (x % y > 0);
 }
 
 // Called during new thread initialization
