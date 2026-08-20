@@ -1931,6 +1931,7 @@ class MultiProcContinuousTest(TestCase):
         init_skip_reason = None
         try:
             cls._init_pg(rank, world_size, rdvz_file)
+            print("pg initialized", cls.pg)
         except SystemExit as ex:
             exit_code = getattr(ex, "code", None)
             skip_entry = next(
@@ -1998,7 +1999,9 @@ class MultiProcContinuousTest(TestCase):
         # it waits for enqueued collectives to finish.
         # Only call this on a clean exit path
         if not raised_exception:
+            print("pg about to be destroyed", cls.pg if hasattr(cls, "pg") else None)
             c10d.destroy_process_group()
+            print("pg destroyed")
 
     @classmethod
     def _spawn_processes(cls, world_size) -> None:
