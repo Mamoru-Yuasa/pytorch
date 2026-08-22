@@ -2,7 +2,10 @@
 import contextlib
 import math
 import random
+import time
 import unittest
+import warnings
+from unittest import mock
 
 import numpy as np
 
@@ -14,7 +17,11 @@ from torch._dynamo.comptime import comptime
 from torch._dynamo.testing import CompileCounter, CompileCounterWithBackend, same
 from torch.testing._internal.common_cuda import PLATFORM_SUPPORTS_MEM_EFF_ATTENTION
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
-from torch.testing._internal.common_utils import skipIfWindows
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+    skipIfWindows,
+)
 from torch.testing._internal.logging_utils import logs_to_string
 
 
@@ -24,8 +31,26 @@ from torch.testing._internal.logging_utils import logs_to_string
 # you assume static by default, put it in a regular test file and
 # test_dynamic_shapes will cover both the YOLO and non-YOLO cases.
 
+_TIME_FUNCTION_NAMES = tuple(
+    name
+    for name in (
+        "monotonic",
+        "monotonic_ns",
+        "perf_counter",
+        "perf_counter_ns",
+        "process_time",
+        "process_time_ns",
+        "thread_time",
+        "thread_time_ns",
+        "time",
+        "time_ns",
+    )
+    if hasattr(time, name)
+)
+
 
 @torch._dynamo.config.patch(assume_static_by_default=False)
+@instantiate_parametrized_tests
 class UnspecTests(torch._dynamo.test_case.TestCase):
     def test_numpy_correctness(self):
         def fn(x, y, z):
@@ -175,6 +200,75 @@ class UnspecTests(torch._dynamo.test_case.TestCase):
             res.append(fn(torch.ones(2)))
         for i in range(1, 5):
             self.assertFalse(same(res[i - 1], res[i]))
+
+    @parametrize("clock_name", _TIME_FUNCTION_NAMES)
+    def test_time_function_unused_no_warning(self, clock_name):
+        torch._dynamo.reset()
+        clock_fn = getattr(time, clock_name)
+
+        def fn():
+            clock_fn()
+
+        opt_fn = torch.compile(fn, backend="eager")
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+            self.assertIsNone(opt_fn())
+
+        self.assertFalse(
+            any(
+                f"time.{clock_name}" in str(warning.message)
+                for warning in caught_warnings
+            )
+        )
+
+    def test_time_functions_preserve_call_order(self):
+        graph_times = []
+
+        def backend(gm, _):
+            def run(*args):
+                graph_times.append(time.perf_counter())
+                return gm(*args)
+
+            return run
+
+        def fn(x):
+            before = time.perf_counter()
+            y = x + 1
+            after = time.perf_counter()
+            return y, before, after
+
+        opt_fn = torch.compile(fn, backend=backend)
+        x = torch.zeros(())
+
+        opt_fn(x)
+        graph_times.clear()
+        result, before, after = opt_fn(x)
+
+        self.assertEqual(result, x + 1)
+        self.assertEqual(len(graph_times), 1)
+        self.assertLessEqual(before, graph_times[0])
+        self.assertLessEqual(graph_times[0], after)
+
+    def test_time_time_does_not_bypass_disable(self):
+        # The time-function branch must stay after torch.compiler.disable handling.
+        @torch.compiler.disable
+        def disabled_time():
+            return 0.0
+
+        with mock.patch.object(time, "time", disabled_time):
+            with self.assertRaisesRegex(
+                torch._dynamo.exc.Unsupported,
+                "Skip calling `torch.compiler.disable\\(\\)`d function",
+            ):
+                torch.compile(lambda: time.time(), backend="eager", fullgraph=True)()
+
+    def test_time_time_monkey_patch_uses_normal_handling(self):
+        def replacement_time():
+            return 1.0
+
+        with mock.patch.object(time, "time", replacement_time):
+            opt_fn = torch.compile(lambda: time.time(), backend="eager", fullgraph=True)
+            self.assertEqual(opt_fn(), 1.0)
 
     def test_random_call_with_while_loop(self):
         def fn(x):
