@@ -727,11 +727,13 @@ class AOTInductorModelContainer {
       }
 
       if (user_managed) {
-        // If user managed, we pass in the pointer directly, and skip the
-        // copy.
+        // Retain the tensor without copying its data. The caller owns the
+        // incoming handle; the constant map owns this shallow handle copy.
+        AtenTensorHandle copied_handle = nullptr;
+        AOTI_TORCH_ERROR_CODE_CHECK(
+            aoti_torch_new_tensor_handle(tensor, &copied_handle));
         target.map->insert_or_assign(
-            constant_name,
-            MaybeOwningAtenTensorHandle(tensor, /* user_managed = */ true));
+            constant_name, RAIIAtenTensorHandle(copied_handle));
         continue;
       }
 
