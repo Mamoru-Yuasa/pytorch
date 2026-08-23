@@ -6,6 +6,7 @@ import pickle
 import re
 import sys
 import tempfile
+import traceback
 import unittest
 from typing import cast
 
@@ -16,6 +17,7 @@ import torch._dynamo.test_case
 from torch._dynamo.comptime import comptime
 from torch._dynamo.exc import (
     BackendCompilerFailed,
+    format_user_stack,
     InvalidBackend,
     ResetRequired,
     ShortenTraceback,
@@ -594,6 +596,69 @@ Failed Source Expressions:
     ~
 """,
             )
+
+    def test_user_stack_repeated_frames_are_compacted(self):
+        frame = traceback.FrameSummary("recursive.py", 1, "fn", line="return fn()")
+
+        result = format_user_stack([frame] * 10)
+
+        self.assertEqual(result.count('File "recursive.py", line 1, in fn'), 3)
+        self.assertIn("[Previous line repeated 7 more times]", result)
+
+    @unittest.skipIf(sys.version_info < (3, 11), "requires column metadata")
+    def test_user_stack_tabbed_source_caret_alignment(self):
+        filename = f"{__file__}.tabbed"
+        source = "\treturn gn()\n"
+        linecache.cache[filename] = (
+            len(source),
+            None,
+            source.splitlines(True),
+            filename,
+        )
+        self.addCleanup(linecache.cache.pop, filename, None)
+        frame = traceback.FrameSummary(
+            filename,
+            1,
+            "fn",
+            lookup_line=False,
+            end_lineno=1,
+            colno=8,
+            end_colno=12,
+        )
+
+        result = format_user_stack([frame])
+
+        self.assertEqual(result, "".join(traceback.format_list([frame])))
+        self.assertNotIn("\t", result)
+
+    @unittest.skipIf(sys.version_info < (3, 11), "requires column metadata")
+    def test_user_stack_long_multiline_range_is_bounded(self):
+        filename = f"{__file__}.long"
+        source_lines = ["class Foo:\n"] + [
+            f"    sentinel_{index} = {index}\n" for index in range(30)
+        ]
+        source = "".join(source_lines)
+        linecache.cache[filename] = (
+            len(source),
+            None,
+            source_lines,
+            filename,
+        )
+        self.addCleanup(linecache.cache.pop, filename, None)
+        frame = traceback.FrameSummary(
+            filename,
+            1,
+            "fn",
+            lookup_line=False,
+            end_lineno=len(source_lines),
+            colno=0,
+            end_colno=len(source_lines[-1].rstrip()),
+        )
+
+        result = format_user_stack([frame])
+
+        self.assertNotIn("sentinel_15", result)
+        self.assertLessEqual(len(result.splitlines()), 10)
 
     def test_vt_source_location_set_during_tracing(self):
         _source_location_capture.clear()
