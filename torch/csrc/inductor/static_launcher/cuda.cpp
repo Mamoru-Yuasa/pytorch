@@ -4,6 +4,7 @@
 #include <ATen/cuda/Exceptions.h>
 #include <ATen/cuda/nvrtc_stub/ATenNVRTC.h>
 #include <torch/csrc/autograd/python_variable.h>
+#include <torch/csrc/inductor/static_launcher/common.h>
 #include <torch/csrc/inductor/static_launcher/cuda.h>
 #include <cstdint>
 
@@ -380,6 +381,20 @@ void parseKernelArgs(
       case 'K':
         convertType<uint64_t>(THPUtils_unpackUInt64, "uint64", slot, item);
         break;
+      case 'e':
+        convertType<uint16_t>(
+            torch::inductor::static_launcher::unpackTritonFp16,
+            "float16",
+            slot,
+            item);
+        break;
+      case 'y':
+        convertType<uint16_t>(
+            torch::inductor::static_launcher::unpackTritonBf16,
+            "bfloat16",
+            slot,
+            item);
+        break;
       case 'f':
         convertType<float>(THPUtils_unpackDouble, "float", slot, item);
         break;
@@ -646,7 +661,8 @@ PyObject* unload_kernel(PyObject* self, PyObject* args) {
   if (!PyArg_ParseTuple(args, "K", &mod_ptr)) {
     return nullptr;
   }
-  CUmodule mod = reinterpret_cast<CUmodule>(mod_ptr);
+  CUmodule mod =
+      reinterpret_cast<CUmodule>(mod_ptr); // NOLINT(performance-no-int-to-ptr)
   if (mod) {
 #if defined(USE_ROCM)
     AT_CUDA_DRIVER_CHECK(hipModuleUnload(mod));
@@ -779,6 +795,7 @@ struct FastCudaLauncherObject {
   uint32_t sharedMemBytes;
   int numKernelArgs; // args passed from Python
   int numTotalArgs; // numKernelArgs + nScratch
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
   char argTypes[MAX_ARGS + 1]; // null-terminated
   // Thread safety: argStorage/kernelArgs are shared across calls but safe
   // because the GIL is held throughout fast_launcher_vectorcall (no
@@ -788,7 +805,9 @@ struct FastCudaLauncherObject {
   // TODO(T000000): Not safe under free-threaded Python (PEP 703, nogil).
   // If two threads call the same instance concurrently without the GIL,
   // they will corrupt argStorage/kernelArgs.  Revisit when nogil is stable.
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
   uint64_t argStorage[MAX_ARGS];
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
   void* kernelArgs[MAX_ARGS];
 };
 
@@ -942,6 +961,20 @@ static PyObject* fast_launcher_vectorcall(
         break;
       case 'K':
         convertType<uint64_t>(THPUtils_unpackUInt64, "uint64", slot, item);
+        break;
+      case 'e':
+        convertType<uint16_t>(
+            torch::inductor::static_launcher::unpackTritonFp16,
+            "float16",
+            slot,
+            item);
+        break;
+      case 'y':
+        convertType<uint16_t>(
+            torch::inductor::static_launcher::unpackTritonBf16,
+            "bfloat16",
+            slot,
+            item);
         break;
       case 'f':
         convertType<float>(THPUtils_unpackDouble, "float", slot, item);
