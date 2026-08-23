@@ -1146,6 +1146,11 @@ static PyObject* assert_alignment(PyObject* dummy, PyObject* args) {
 
   at::Tensor tensor = THPVariable_Unpack(item);
 
+  // See Note [Runtime alignment assertions] in
+  // torch/csrc/inductor/aoti_runtime/utils.h. The Python wrapper preserves its
+  // legacy storage-offset check and diagnostic, while AOTI checks the actual
+  // pointer so it can diagnose externally backed storage with a misaligned
+  // base address.
   int64_t storage_offset = tensor.storage_offset();
   size_t itemsize = tensor.itemsize();
   if (storage_offset * itemsize % alignment != 0) {
