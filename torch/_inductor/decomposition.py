@@ -35,7 +35,10 @@ from torch._prims_common import (
     suggest_memory_format,
     type_to_dtype,
 )
-from torch._refs import native_layer_norm as decomp_native_layer_norm
+from torch._refs import (
+    _native_group_norm as decomp_native_group_norm,
+    native_layer_norm as decomp_native_layer_norm,
+)
 from torch.fx.experimental.symbolic_shapes import (
     guard_or_false,
     statically_known_true,
@@ -43,6 +46,7 @@ from torch.fx.experimental.symbolic_shapes import (
 )
 
 from . import config, inductor_prims
+from .cpu_vec_isa import get_cpu_contiguous_group_norm_fma_policy
 from .utils import (
     is_gpu,
     needs_fallback_due_to_atomic_add_limitations,
@@ -92,7 +96,6 @@ inductor_decompositions = get_decompositions(
         aten._batch_norm_no_update,
         aten.batch_norm_backward,
         aten.native_batch_norm,
-        aten.native_group_norm,
         aten.native_layer_norm,
         aten.nll_loss2d_backward,
         aten.permute_copy,
@@ -305,6 +308,83 @@ def _native_layer_norm(
         return NotImplemented
     # We can write a util function to update decomp table if we have more ops to fallback.
     return decomp_native_layer_norm(input, normalized_shape, weight, bias, eps)
+
+
+@register_decomposition(aten.native_group_norm)
+def _native_group_norm(
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    batch_size: int,
+    num_channels: int,
+    flattened_inner_size: int,
+    num_groups: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    memory_format = suggest_memory_format(input)
+    if (
+        input.device.type != "cpu"
+        or input.dtype != torch.float32
+        or memory_format != torch.contiguous_format
+        or config.cpu_backend != "cpp"
+    ):
+        return decomp_native_group_norm(
+            input,
+            weight,
+            bias,
+            batch_size,
+            num_channels,
+            flattened_inner_size,
+            num_groups,
+            eps,
+        )
+
+    reduction_numel = flattened_inner_size * (num_channels // num_groups)
+    # Keep this predicate aligned with use_two_step_variance in lowering.py.
+    uses_two_step_variance = config.mtia.disable_welford_reduction or (
+        statically_known_true(
+            reduction_numel <= config.cpp.use_two_step_variance_threshold
+        )
+        and not statically_known_true(batch_size * num_groups == 1)
+    )
+    # Native GroupNorm uses rowwise moments, while Inductor's small CPU
+    # reductions use a two-step vector sum. Their mean can round differently,
+    # and no affine FMA policy can recover the native result.
+    if uses_two_step_variance:
+        return NotImplemented
+
+    if weight is None and bias is None:
+        return decomp_native_group_norm(
+            input,
+            weight,
+            bias,
+            batch_size,
+            num_channels,
+            flattened_inner_size,
+            num_groups,
+            eps,
+        )
+
+    bias_uses_fma, output_uses_fma = get_cpu_contiguous_group_norm_fma_policy()
+    if output_uses_fma is None or (bias is not None and bias_uses_fma is None):
+        return NotImplemented
+    if config.cpp.enable_floating_point_contract_flag != "off" and (
+        not output_uses_fma or (bias is not None and not bias_uses_fma)
+    ):
+        return NotImplemented
+    return decomp_native_group_norm(
+        input,
+        weight,
+        bias,
+        batch_size,
+        num_channels,
+        flattened_inner_size,
+        num_groups,
+        eps,
+        bias_fma=inductor_prims.fma if bias_uses_fma else None,
+        output_fma=inductor_prims.fma if output_uses_fma else None,
+        use_cpu_affine_formula=True,
+    )
 
 
 @register_decomposition([aten.sym_constrain_range_for_size.default])
