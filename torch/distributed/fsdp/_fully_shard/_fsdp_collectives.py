@@ -634,6 +634,19 @@ def foreach_reduce(
         if all_reduce_group is not None:  # HSDP or DDP/replicate
             # Accumulations must run in the reduce-scatter stream
             if not all_reduce_grads:
+                # TODO(#194546): this buffer is held at reduce_dtype, so each
+                # microbatch's contribution is rounded into it and the error
+                # compounds with the microbatch count even when an explicit
+                # grad_dtype is wider. Deferred rather than fixed alongside the
+                # sibling no-sync mode because the two are not comparable:
+                # set_requires_gradient_sync(False) runs no collectives, so
+                # honoring grad_dtype in
+                # FSDPParam.to_accumulated_grad_if_needed is free and removes
+                # the loss entirely, whereas here the reduce-scatter above has
+                # already rounded every contribution to reduce_dtype. Widening
+                # this buffer removes the compounding but not that floor, and
+                # costs a wider allocation held across the whole accumulation
+                # window, so it is worth landing and reverting on its own.
                 if partial_reduce_output is not None:
                     partial_reduce_output += reduce_output
                 else:
@@ -693,7 +706,16 @@ def foreach_reduce(
         # AR to finish. The reduce-dtype buffer is held across layers by
         # FSDPParamGroup._all_reduce_state (captured above) to prevent
         # this. See PR #140044, regression test PR #180900.
-        reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
+        # Cast directly to an explicitly set grad_dtype, skipping orig_dtype to
+        # avoid a lossy round-trip (e.g. fp32 reduce -> bf16 orig -> fp32). Read
+        # the snapshot taken at construction, which is what was propagated onto
+        # the parameter that autograd produced these gradients for; the live
+        # grad_dtype can be None, which means any dtype is allowed rather than
+        # "do not cast".
+        target_dtype = orig_dtype
+        if fsdp_params and fsdp_params[0]._explicit_grad_dtype is not None:
+            target_dtype = fsdp_params[0]._explicit_grad_dtype
+        grad_output = _to_dtype_if_needed(reduce_output, target_dtype)
         # View out and accumulate sharded gradients
         flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
         for padded_unsharded_size, fsdp_param in zip(
@@ -702,7 +724,7 @@ def foreach_reduce(
             # Assume even sharding for Shard(i), i > 0; otherwise would require
             # copy-out for contiguous strides
             new_sharded_grad = torch.as_strided(
-                reduce_output,
+                grad_output,
                 size=fsdp_param.sharded_size,
                 stride=fsdp_param.contiguous_sharded_stride,
                 storage_offset=flat_grad_offset,
