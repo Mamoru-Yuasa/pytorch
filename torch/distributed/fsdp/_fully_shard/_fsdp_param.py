@@ -1112,8 +1112,8 @@ class FSDPParam:
         # which is the case this method already returns early for.
         # This covers no-sync via `set_requires_gradient_sync(False)`, which
         # runs no collectives. HSDP's `set_requires_all_reduce(False)` still
-        # reduce-scatters per microbatch and accumulates the partial sums at
-        # `reduce_dtype` in `foreach_reduce`; see TODO(#194546) there.
+        # reduce-scatters per microbatch; `foreach_reduce` widens the partial
+        # sum buffer the same way.
         unsharded_param = getattr(self, "_unsharded_param", None)
         accumulate_dtype = self._accumulate_grad_dtype
         if (

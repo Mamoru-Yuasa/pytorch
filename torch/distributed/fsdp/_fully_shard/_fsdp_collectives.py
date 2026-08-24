@@ -634,23 +634,17 @@ def foreach_reduce(
         if all_reduce_group is not None:  # HSDP or DDP/replicate
             # Accumulations must run in the reduce-scatter stream
             if not all_reduce_grads:
-                # TODO(#194546): this buffer is held at reduce_dtype, so each
-                # microbatch's contribution is rounded into it and the error
-                # compounds with the microbatch count even when an explicit
-                # grad_dtype is wider. Deferred rather than fixed alongside the
-                # sibling no-sync mode because the two are not comparable:
-                # set_requires_gradient_sync(False) runs no collectives, so
-                # honoring grad_dtype in
-                # FSDPParam.to_accumulated_grad_if_needed is free and removes
-                # the loss entirely, whereas here the reduce-scatter above has
-                # already rounded every contribution to reduce_dtype. Widening
-                # this buffer removes the compounding but not that floor, and
-                # costs a wider allocation held across the whole accumulation
-                # window, so it is worth landing and reverting on its own.
                 if partial_reduce_output is not None:
                     partial_reduce_output += reduce_output
                 else:
-                    partial_reduce_output = reduce_output
+                    # Holding the partial sum at `reduce_dtype` rounds once per
+                    # microbatch, and that error compounds with the microbatch
+                    # count. Widen it the same way the no-collectives no-sync
+                    # path widens its accumulator, so the two cannot diverge.
+                    partial_reduce_output = _to_dtype_if_needed(
+                        reduce_output,
+                        fsdp_params[0]._accumulate_grad_dtype if fsdp_params else None,
+                    )
                 return (
                     reduce_scatter_input,
                     reduce_scatter_event,
