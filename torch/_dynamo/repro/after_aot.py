@@ -98,6 +98,7 @@ from torch.fx.experimental.symbolic_shapes import (
 from torch.hub import tqdm
 
 from .. import config
+from . import _minifier_sanity_guard
 
 
 def _find_repeat_interleave_constraints(
@@ -1320,7 +1321,10 @@ def repro_minify(options: ReproOptions, mod: nn.Module, load_args: Any) -> None:
     else:
         module_fails = ACCURACY_FAILS[options.accuracy]
 
-    with config.patch(repro_after=None):
+    original_failure = (
+        AccuracyError("Bad accuracy detected") if options.accuracy else None
+    )
+    with config.patch(repro_after=None), _minifier_sanity_guard() as sanity:
         minifier(
             mod,
             args,
@@ -1334,6 +1338,7 @@ def repro_minify(options: ReproOptions, mod: nn.Module, load_args: Any) -> None:
             skip_sanity=options.skip_sanity,
             max_granularity=options.max_granularity,
         )
+    sanity.raise_if_failed(original_failure)
 
 
 def repro_analyze(options: ReproOptions, mod: nn.Module, load_args: Any) -> None:
