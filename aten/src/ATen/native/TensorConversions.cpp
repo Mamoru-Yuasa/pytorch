@@ -53,11 +53,15 @@
 #endif
 
 #include <ATen/SparseCsrTensorUtils.h>
+#include <ATen/TensorSubclassLikeUtils.h>
 #include <ATen/core/ATen_fwd.h>
+#include <ATen/detail/CUDAHooksInterface.h>
 #include <ATen/native/IndexingUtils.h>
 #include <ATen/native/NonSymbolicBC.h>
 #include <ATen/native/SparseTensorUtils.h>
 #include <ATen/native/TensorConversions.h>
+#include <c10/core/GradMode.h>
+#include <c10/core/InferenceMode.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <algorithm>
 #include <numeric>
@@ -227,6 +231,62 @@ static inline std::optional<Device> ensure_has_index(
     return std::nullopt;
   }
   return ensure_has_index(device.value());
+}
+
+static Tensor maybe_to_unified_memory_alias(
+    const Tensor& self,
+    std::optional<ScalarType> dtype,
+    std::optional<Layout> layout,
+    std::optional<Device> device,
+    std::optional<bool> pin_memory,
+    bool non_blocking,
+    std::optional<c10::MemoryFormat> optional_memory_format) {
+  if (!device.has_value()) {
+    return {};
+  }
+
+  Device target = ensure_has_index(*device);
+  bool cpu_to_cuda = self.device().is_cpu() && target.is_cuda();
+  bool cuda_to_cpu = self.device().is_cuda() && target.is_cpu();
+  if (!cpu_to_cuda && !cuda_to_cpu) {
+    return {};
+  }
+
+  auto& cuda_hooks = at::detail::getCUDAHooks();
+  if (!cuda_hooks.hasROCM()) {
+    return {};
+  }
+
+  if (c10::InferenceMode::is_enabled() || self.is_inference() ||
+      isTensorSubclassLike(self) || !self.has_storage() || self.is_nested() ||
+      self._is_zerotensor() ||
+      (self.requires_grad() && c10::GradMode::is_enabled()) ||
+      self._fw_grad(/*level=*/0).defined() || self.is_quantized() ||
+      self.layout() != kStrided || self.is_conj() || self.is_neg() ||
+      !self.is_non_overlapping_and_dense() ||
+      (dtype.has_value() && *dtype != self.scalar_type()) ||
+      (layout.has_value() && *layout != self.layout()) ||
+      pin_memory.value_or(false) ||
+      optional_memory_format.value_or(MemoryFormat::Preserve) !=
+          MemoryFormat::Preserve) {
+    return {};
+  }
+
+  auto storage = cuda_hooks.maybeCreateUnifiedMemoryAlias(
+      self.storage(), target, non_blocking);
+  if (storage == nullptr) {
+    return {};
+  }
+
+  auto options = self.options().device(target);
+  auto impl = c10::make_intrusive<c10::TensorImpl>(
+      c10::Storage(std::move(storage)),
+      options.computeDispatchKey(),
+      self.dtype());
+  impl->set_sizes_and_strides(
+      self.sym_sizes(), self.sym_strides(), self.sym_storage_offset());
+  impl->set_version_counter(self.unsafeGetTensorImpl()->version_counter());
+  return Tensor(std::move(impl));
 }
 
 Tensor _to_copy(
@@ -435,6 +495,19 @@ static inline Tensor to_impl(
   if (to_will_alias(
           self, dtype, layout, device, copy, optional_memory_format)) {
     return self;
+  }
+  if (!copy) {
+    Tensor alias = maybe_to_unified_memory_alias(
+        self,
+        dtype,
+        layout,
+        device,
+        pin_memory,
+        non_blocking,
+        optional_memory_format);
+    if (alias.defined()) {
+      return alias;
+    }
   }
   return at::_to_copy(
       self,
