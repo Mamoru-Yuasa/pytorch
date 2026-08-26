@@ -20,6 +20,10 @@ requires = [
     # assembly loops at build time and does `import six`. NNPACK is on by
     # default (USE_NNPACK=ON); isolated PEP 517 builds need six available.
     "six",
+    # Keep direct source installs on the versions used by requirements-build.
+    # CMake 4 removes compatibility needed by NNPACK's dependency projects.
+    "cmake==3.31.6",
+    "ninja",
 ]
 build-backend = "tools.build_backend"
 backend-path = ["."]

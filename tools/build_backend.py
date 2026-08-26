@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
-from scikit_build_core import build as _backend
+from scikit_build_core import build as _backend  # pyrefly: ignore[missing-import]
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,9 +37,7 @@ def build_wheel(
     metadata_directory: str | None = None,
 ) -> str:
     _prepare_rocm_source()
-    return _backend.build_wheel(
-        wheel_directory, config_settings, metadata_directory
-    )
+    return _backend.build_wheel(wheel_directory, config_settings, metadata_directory)
 
 
 def build_editable(
@@ -48,9 +46,7 @@ def build_editable(
     metadata_directory: str | None = None,
 ) -> str:
     _prepare_rocm_source()
-    return _backend.build_editable(
-        wheel_directory, config_settings, metadata_directory
-    )
+    return _backend.build_editable(wheel_directory, config_settings, metadata_directory)
 
 
 build_sdist = _backend.build_sdist

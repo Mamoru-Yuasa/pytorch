@@ -1,11 +1,12 @@
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from torch.testing._internal.common_utils import run_tests, TestCase
 from tools import build_backend
+
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 class TestBuildBackend(TestCase):
