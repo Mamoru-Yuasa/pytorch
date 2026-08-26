@@ -21,7 +21,8 @@ requires = [
     # default (USE_NNPACK=ON); isolated PEP 517 builds need six available.
     "six",
 ]
-build-backend = "scikit_build_core.build"
+build-backend = "tools.build_backend"
+backend-path = ["."]
 
 [tool.scikit-build]
 # Track the build-system.requires floor (scikit-build-core>=1.0) so the schema
