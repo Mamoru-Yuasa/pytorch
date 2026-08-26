@@ -31,6 +31,11 @@ struct CUDAHooks : public at::CUDAHooksInterface {
   bool hasCuSOLVER() const override;
   bool hasCuBLASLt() const override;
   bool hasROCM() const override;
+  bool isUnifiedMemoryDevice(DeviceIndex device_index) const override;
+  c10::intrusive_ptr<c10::StorageImpl> maybeCreateUnifiedMemoryAlias(
+      const c10::Storage& source,
+      Device target,
+      bool non_blocking) const override;
   bool hasCKSDPA() const override;
   bool hasCKGEMM() const override;
   const at::cuda::NVRTC& nvrtc() const override;

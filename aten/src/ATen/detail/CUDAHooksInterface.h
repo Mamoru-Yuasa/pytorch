@@ -6,6 +6,11 @@
 
 #include <ATen/detail/AcceleratorHooksInterface.h>
 
+namespace c10 {
+struct Storage;
+struct StorageImpl;
+} // namespace c10
+
 // NB: Class must live in `at` due to limitations of Registry.h.
 namespace at {
 
@@ -116,6 +121,18 @@ struct TORCH_API CUDAHooksInterface : AcceleratorHooksInterface {
 
   virtual bool hasROCM() const {
     return false;
+  }
+
+  virtual bool isUnifiedMemoryDevice(DeviceIndex /*device_index*/) const {
+    return false;
+  }
+
+  virtual c10::intrusive_ptr<c10::StorageImpl>
+  maybeCreateUnifiedMemoryAlias(
+      const c10::Storage& /*source*/,
+      Device /*target*/,
+      bool /*non_blocking*/) const {
+    return nullptr;
   }
 
   virtual bool hasCKSDPA() const {

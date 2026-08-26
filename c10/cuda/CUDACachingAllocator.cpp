@@ -1,6 +1,7 @@
 #include <c10/cuda/CUDACachingAllocator.h>
 
 #include <c10/core/RingBuffer.h>
+#include <c10/core/Storage.h>
 #include <c10/core/impl/GPUTrace.h>
 #include <c10/cuda/CUDAAllocatorConfig.h>
 #include <c10/cuda/CUDAException.h>
@@ -49,6 +50,7 @@
 #include <set>
 #include <stack>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -87,6 +89,341 @@ namespace {
 std::atomic<size_t> g_expandable_segments_reserved_bytes{0};
 std::atomic<size_t> g_expandable_segments_count{0};
 } // namespace
+
+#if defined(USE_ROCM)
+namespace {
+
+class UnifiedMemoryAliasOwner;
+
+struct UnifiedMemoryAliasRegistry {
+  std::mutex mutex;
+  std::unordered_map<StorageImpl*, std::shared_ptr<UnifiedMemoryAliasOwner>>
+      owners;
+};
+
+UnifiedMemoryAliasRegistry& unifiedMemoryAliasRegistry() {
+  static auto* registry = new UnifiedMemoryAliasRegistry;
+  return *registry;
+}
+
+class UnifiedMemoryAliasOwner {
+ public:
+  UnifiedMemoryAliasOwner(
+      Storage source,
+      void* host_ptr,
+      void* device_ptr,
+      DeviceIndex device,
+      bool unregister_host)
+      : source_(std::move(source)),
+        source_impl_(source_.unsafeGetStorageImpl()),
+        host_ptr_(host_ptr),
+        device_ptr_(device_ptr),
+        device_(device),
+        unregister_host_(unregister_host),
+        was_resizable_(source_.resizable()) {
+    source_impl_->set_resizable(false);
+  }
+
+  ~UnifiedMemoryAliasOwner() {
+    TORCH_INTERNAL_ASSERT(cleaned_up_);
+  }
+
+  void* pointer(Device target) const {
+    if (target.is_cpu()) {
+      return host_ptr_;
+    }
+    if (target.is_cuda() && target.index() == device_) {
+      return device_ptr_;
+    }
+    return nullptr;
+  }
+
+  DeviceIndex device() const {
+    return device_;
+  }
+
+  StorageImpl* sourceImpl() const {
+    return source_impl_;
+  }
+
+  void retainAlias() {
+    alias_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void releaseAlias() {
+    if (alias_count_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+      return;
+    }
+
+    auto& registry = unifiedMemoryAliasRegistry();
+    std::lock_guard lock(registry.mutex);
+    if (alias_count_.load(std::memory_order_acquire) != 0) {
+      return;
+    }
+    cleanup();
+    auto it = registry.owners.find(source_impl_);
+    if (it != registry.owners.end() && it->second.get() == this) {
+      registry.owners.erase(it);
+    }
+  }
+
+  void recordStream(CUDAStream stream) {
+    std::lock_guard lock(stream_mutex_);
+    auto it = std::find_if(
+        streams_.begin(), streams_.end(), [&](const CUDAStream& recorded) {
+          return recorded == stream;
+        });
+    if (it == streams_.end()) {
+      streams_.push_back(stream);
+    }
+  }
+
+ private:
+  void cleanup() {
+    CUDAGuard guard(device_);
+    {
+      std::lock_guard lock(stream_mutex_);
+      for (const auto& stream : streams_) {
+        C10_CUDA_CHECK_WARN(cudaStreamSynchronize(stream.stream()));
+      }
+    }
+    if (unregister_host_) {
+      C10_CUDA_CHECK_WARN(cudaHostUnregister(host_ptr_));
+    }
+    source_impl_->set_resizable(was_resizable_);
+    cleaned_up_ = true;
+  }
+
+  Storage source_;
+  StorageImpl* source_impl_;
+  void* host_ptr_;
+  void* device_ptr_;
+  DeviceIndex device_;
+  bool unregister_host_;
+  bool was_resizable_;
+  bool cleaned_up_ = false;
+  std::atomic<size_t> alias_count_{0};
+  std::mutex stream_mutex_;
+  std::vector<CUDAStream> streams_;
+};
+
+struct UnifiedMemoryAliasContext {
+  explicit UnifiedMemoryAliasContext(
+      std::shared_ptr<UnifiedMemoryAliasOwner> owner)
+      : owner(std::move(owner)) {
+    this->owner->retainAlias();
+  }
+
+  ~UnifiedMemoryAliasContext() {
+    owner->releaseAlias();
+  }
+
+  std::shared_ptr<UnifiedMemoryAliasOwner> owner;
+};
+
+void deleteUnifiedMemoryAlias(void* context) {
+  delete static_cast<UnifiedMemoryAliasContext*>(context);
+}
+
+std::shared_ptr<UnifiedMemoryAliasOwner> getAliasOwner(
+    const DataPtr& data_ptr) {
+  if (data_ptr.get_deleter() != &deleteUnifiedMemoryAlias) {
+    return nullptr;
+  }
+  auto* context =
+      static_cast<UnifiedMemoryAliasContext*>(data_ptr.get_context());
+  return context->owner;
+}
+
+bool getPointerAttributes(const void* ptr, cudaPointerAttributes* attrs) {
+  auto error = cudaPointerGetAttributes(attrs, ptr);
+  if (error == cudaSuccess) {
+    return true;
+  }
+  cudaGetLastError();
+  return false;
+}
+
+std::shared_ptr<UnifiedMemoryAliasOwner> createAliasOwner(
+    const Storage& source,
+    Device target) {
+  void* source_ptr = source.data_ptr().get();
+  if (source_ptr == nullptr || source.nbytes() == 0) {
+    return nullptr;
+  }
+
+  void* host_ptr = nullptr;
+  void* device_ptr = nullptr;
+  DeviceIndex device = -1;
+  bool unregister_host = false;
+
+  if (source.device_type() == DeviceType::CUDA && target.is_cpu()) {
+    device = source.device().index();
+    if (!isUnifiedMemoryDevice(device)) {
+      return nullptr;
+    }
+    cudaPointerAttributes attrs{};
+    if (!getPointerAttributes(source_ptr, &attrs) ||
+        (attrs.type != cudaMemoryTypeDevice &&
+         attrs.type != cudaMemoryTypeManaged)) {
+      return nullptr;
+    }
+    host_ptr = attrs.hostPointer != nullptr ? attrs.hostPointer : source_ptr;
+    device_ptr = source_ptr;
+  } else if (source.device_type() == DeviceType::CPU && target.is_cuda()) {
+    device = target.index();
+    if (!isUnifiedMemoryDevice(device)) {
+      return nullptr;
+    }
+    CUDAGuard guard(device);
+    cudaPointerAttributes attrs{};
+    if (getPointerAttributes(source_ptr, &attrs) &&
+        attrs.type != cudaMemoryTypeUnregistered) {
+      if (attrs.type == cudaMemoryTypeDevice ||
+          attrs.type == cudaMemoryTypeManaged) {
+        if (attrs.device != device) {
+          return nullptr;
+        }
+        host_ptr =
+            attrs.hostPointer != nullptr ? attrs.hostPointer : source_ptr;
+        device_ptr =
+            attrs.devicePointer != nullptr ? attrs.devicePointer : source_ptr;
+      } else if (attrs.type == cudaMemoryTypeHost) {
+        host_ptr = source_ptr;
+        auto error = cudaHostGetDevicePointer(&device_ptr, source_ptr, 0);
+        if (error != cudaSuccess) {
+          cudaGetLastError();
+          return nullptr;
+        }
+      } else {
+        return nullptr;
+      }
+    } else {
+      auto error = cudaHostRegister(
+          source_ptr, source.nbytes(), cudaHostRegisterDefault);
+      if (error != cudaSuccess) {
+        cudaGetLastError();
+        return nullptr;
+      }
+      unregister_host = true;
+      host_ptr = source_ptr;
+      error = cudaHostGetDevicePointer(&device_ptr, source_ptr, 0);
+      if (error != cudaSuccess) {
+        C10_CUDA_CHECK_WARN(cudaHostUnregister(source_ptr));
+        cudaGetLastError();
+        return nullptr;
+      }
+    }
+  } else {
+    return nullptr;
+  }
+
+  return std::make_shared<UnifiedMemoryAliasOwner>(
+      source, host_ptr, device_ptr, device, unregister_host);
+}
+
+} // namespace
+#endif
+
+bool isUnifiedMemoryDevice(DeviceIndex device) {
+#if defined(USE_ROCM)
+  cudaDeviceProp properties{};
+  auto error = cudaGetDeviceProperties(&properties, device);
+  if (error != cudaSuccess) {
+    cudaGetLastError();
+    return false;
+  }
+  return properties.integrated && properties.unifiedAddressing &&
+      properties.canMapHostMemory;
+#else
+  (void)device;
+  return false;
+#endif
+}
+
+intrusive_ptr<StorageImpl> maybeCreateUnifiedMemoryAlias(
+    const Storage& source,
+    Device target,
+    bool non_blocking) {
+#if defined(USE_ROCM)
+  auto owner = getAliasOwner(source.data_ptr());
+  std::unique_ptr<UnifiedMemoryAliasContext> context;
+  if (owner != nullptr) {
+    if (owner->pointer(target) == nullptr) {
+      return nullptr;
+    }
+    context = std::make_unique<UnifiedMemoryAliasContext>(owner);
+  } else {
+    auto& registry = unifiedMemoryAliasRegistry();
+    std::lock_guard lock(registry.mutex);
+    auto it = registry.owners.find(source.unsafeGetStorageImpl());
+    if (it != registry.owners.end()) {
+      owner = it->second;
+    } else {
+      owner = createAliasOwner(source, target);
+      if (owner != nullptr) {
+        registry.owners.emplace(owner->sourceImpl(), owner);
+      }
+    }
+    if (owner == nullptr || owner->pointer(target) == nullptr) {
+      return nullptr;
+    }
+    context = std::make_unique<UnifiedMemoryAliasContext>(owner);
+  }
+
+  void* target_ptr = owner->pointer(target);
+  if (target.is_cpu() && !non_blocking) {
+    CUDAGuard guard(owner->device());
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
+  }
+
+  DataPtr data_ptr(
+      target_ptr, context.release(), &deleteUnifiedMemoryAlias, target);
+  if (target.is_cuda()) {
+    owner->recordStream(getCurrentCUDAStream(target.index()));
+  }
+  Allocator* target_allocator =
+      target.is_cpu() ? GetAllocator(DeviceType::CPU) : get();
+  return make_storage_impl(
+      StorageImpl::use_byte_size_t(),
+      source.sym_nbytes(),
+      std::move(data_ptr),
+      target_allocator,
+      false,
+      target);
+#else
+  (void)source;
+  (void)target;
+  (void)non_blocking;
+  return nullptr;
+#endif
+}
+
+bool isUnifiedMemoryAlias(const DataPtr& data_ptr) {
+#if defined(USE_ROCM)
+  return data_ptr.get_deleter() == &deleteUnifiedMemoryAlias;
+#else
+  (void)data_ptr;
+  return false;
+#endif
+}
+
+bool recordUnifiedMemoryAliasStream(
+    const DataPtr& data_ptr,
+    CUDAStream stream) {
+#if defined(USE_ROCM)
+  auto owner = getAliasOwner(data_ptr);
+  if (owner == nullptr) {
+    return false;
+  }
+  owner->recordStream(stream);
+  return true;
+#else
+  (void)data_ptr;
+  (void)stream;
+  return false;
+#endif
+}
 
 #if defined(PYTORCH_C10_DRIVER_API_SUPPORTED) || defined(USE_ROCM)
 static int get_self_pid() {
