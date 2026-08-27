@@ -1,6 +1,7 @@
 # Owner(s): ["module: cuda"]
 
 import gc
+import mmap
 
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
@@ -156,6 +157,39 @@ class TestAPUDevice(TestCase):
         gc.collect()
         cpu.resize_(16)
         self.assertEqual(cpu.numel(), 16)
+
+    def test_aliases_sharing_a_host_page_stay_valid(self, device):
+        self._require_apu(device)
+        page = mmap.PAGESIZE
+        held = []
+        by_page = {}
+        pair = None
+        for _ in range(512):
+            candidate = torch.arange(8, dtype=torch.float32)
+            held.append(candidate)
+            start = candidate.data_ptr()
+            end = start + candidate.numel() * candidate.element_size() - 1
+            if start // page != end // page:
+                continue
+            other = by_page.setdefault(start // page, candidate)
+            if other is not candidate:
+                pair = (other, candidate)
+                break
+        if pair is None:
+            self.skipTest("could not place two CPU tensors in one host page")
+
+        first, second = pair
+        first_gpu = first.to(device)
+        second_gpu = second.to(device)
+        self.assertTrue(torch.cuda.apu.is_shared(first_gpu))
+        self.assertTrue(torch.cuda.apu.is_shared(second_gpu))
+
+        del first_gpu
+        gc.collect()
+
+        second_gpu.add_(1)
+        torch.cuda.synchronize(device)
+        self.assertEqual(second, torch.arange(8, dtype=torch.float32) + 1)
 
     def test_record_stream_keeps_registered_storage_alive(self, device):
         self._require_apu(device)

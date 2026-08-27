@@ -270,11 +270,12 @@ if torch.cuda.apu.is_shared(gpu):
 Because `copy=False` permits aliasing, in-place writes through either result are
 visible through the other alias. Use `to(..., copy=True)` when independent
 storage is required. The source storage cannot be resized while an alias is
-alive. GPU-to-CPU conversion synchronizes by default; callers using
-`non_blocking=True` retain the usual responsibility for stream synchronization.
-Autograd-requiring tensors, forward-mode dual tensors, inference mode, dtype
-conversions, unsupported layouts, and unsuccessful runtime registration
-automatically fall back to a copy.
+alive. GPU-to-CPU conversion waits for the streams associated with the
+allocation by default; callers using `non_blocking=True` retain the usual
+responsibility for stream synchronization. Autograd-requiring tensors,
+forward-mode dual tensors, inference mode, dtype conversions, unsupported
+layouts, and unsuccessful runtime registration automatically fall back to a
+copy.
 
 `torch.cuda.apu.is_available()` reports the runtime capability and
 `torch.cuda.apu.is_shared(tensor)` identifies a conversion whose copy was
