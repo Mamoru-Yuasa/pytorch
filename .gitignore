@@ -410,3 +410,8 @@ CLAUDE.local.md
 /debug_*.py
 CLAUDE_CONTEXT/
 /.claude/settings.local.json
+
+# Wheel build outputs. Release artifacts are published, not committed.
+wheelhouse/*.whl
+wheelhouse/candidate-*/
+wheelhouse/fixes-*/
