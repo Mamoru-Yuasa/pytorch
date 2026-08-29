@@ -1216,6 +1216,20 @@ static void registerCudaDeviceProperties(PyObject* module) {
   });
 }
 
+static void registerAPUBindings(PyObject* module) {
+  auto m = py::handle(module).cast<py::module>();
+  m.def("_cuda_isAPUSupported", [](c10::DeviceIndex device) {
+    return at::detail::getCUDAHooks().isUnifiedMemoryDevice(device);
+  });
+  m.def("_cuda_isUnifiedMemoryAlias", [](const at::Tensor& tensor) {
+    if (!tensor.has_storage()) {
+      return false;
+    }
+    return c10::cuda::CUDACachingAllocator::isUnifiedMemoryAlias(
+        tensor.storage().data_ptr());
+  });
+}
+
 // We choose to ignore certain blocks that are currently allocated
 // when we set the pool to its checkpoint. For those blocks, we need
 // to swap out the deleter function of their corresponding blocks
@@ -2413,6 +2427,7 @@ void initModule(PyObject* module) {
 #endif
   shared::initGdsBindings(module);
   registerCudaDeviceProperties(module);
+  registerAPUBindings(module);
   registerCudaPluggableAllocator(module);
   initCudaMethodBindings(module);
 }

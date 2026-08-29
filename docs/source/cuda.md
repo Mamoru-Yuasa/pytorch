@@ -113,6 +113,76 @@
     make_graphed_callables
 ```
 
+## ROCm APU unified memory
+
+On a supported integrated ROCm device, PyTorch automatically avoids a physical
+copy for eligible CPU-to-GPU and GPU-to-CPU `Tensor.to` conversions. Runtime
+device properties and pointer capabilities determine whether an allocation can
+be shared; device model names, cluster settings, and environment-specific paths
+are not used. Unsupported devices and allocations retain the normal copy path.
+
+The APU-enabled branch can be installed directly into an active virtual
+environment. With a ROCm toolchain on `PATH`, pip automatically prepares the
+ROCm sources before building the wheel:
+
+```bash
+python -m pip install \
+    "git+https://github.com/Mamoru-Yuasa/pytorch.git@mi300a-apu-shared-memory-v2.13"
+```
+
+Automatic sharing applies when `copy=False`, the dtype and layout are
+unchanged, the tensor is non-overlapping and dense, and the conversion does not
+need an autograd edge. This includes transfers made under `torch.no_grad()`, as
+used when moving module parameters. A CPU allocation is registered with HIP for
+device access, while a GPU allocation uses its host mapping. The returned
+tensor retains the source allocation and shares its autograd version counter.
+
+```python
+import torch
+
+cpu = torch.ones(1024, 1024)
+gpu = cpu.to("cuda")
+result = gpu.square()
+result_cpu = result.cpu()
+
+if torch.cuda.apu.is_shared(gpu):
+    print("CPU-to-GPU copy was elided")
+```
+
+Because `copy=False` permits aliasing, in-place writes through either result are
+visible through the other alias. Use `to(..., copy=True)` when independent
+storage is required. The source storage cannot be resized while an alias is
+alive. GPU-to-CPU conversion waits for the streams associated with the
+allocation by default; callers using `non_blocking=True` retain the usual
+responsibility for stream synchronization. Autograd-requiring tensors,
+forward-mode dual tensors, inference mode, dtype conversions, unsupported
+layouts, and unsuccessful runtime registration automatically fall back to a
+copy.
+
+`torch.cuda.apu.is_available()` reports the runtime capability and
+`torch.cuda.apu.is_shared(tensor)` identifies a conversion whose copy was
+elided. `shared_empty` and `cpu_view` remain available when an explicitly paired
+allocation is useful. See the
+[ROCm unified-memory documentation](https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/memory_management/unified_memory.html)
+for allocator and host-registration behavior.
+
+```{eval-rst}
+.. automodule:: torch.cuda.apu
+.. currentmodule:: torch.cuda.apu
+
+.. autosummary::
+    :toctree: generated
+    :nosignatures:
+
+    is_available
+    is_shared
+    shared_empty
+    cpu_view
+    SharedTensor
+
+.. currentmodule:: torch.cuda
+```
+
 (cuda-memory-management-api)=
 
 ```{eval-rst}

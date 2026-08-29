@@ -28,7 +28,11 @@
 
 #if USE_ROCM
 #if defined(USE_FLASH_ATTENTION) || defined(USE_MEM_EFF_ATTENTION)
+#include <aotriton/config.h>
 #include <ATen/native/transformers/hip/aotriton_versions.h>
+#if AOTRITON_VERSION_MAJOR == 0 && AOTRITON_VERSION_MINOR == 12
+#define AOTRITON_V2_API_FLASH_ATTN_H
+#endif
 #include <aotriton/flash.h>
 #define USE_ROCM_ATTENTION 1
 #endif

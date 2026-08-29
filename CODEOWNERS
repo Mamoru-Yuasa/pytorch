@@ -216,6 +216,7 @@ torch/cuda/ @eqy @syed-ahmed @Aidyn-A
 torch/csrc/cuda/ @eqy @syed-ahmed @Aidyn-A
 torch/backends/cuda/ @eqy @syed-ahmed @Aidyn-A
 torch/backends/cudnn/ @eqy @syed-ahmed @Aidyn-A
+/test/test_cuda_apu.py @eqy @syed-ahmed @Aidyn-A
 
 # PyTree utilities
 /torch/utils/_pytree.py @XuehaiPan

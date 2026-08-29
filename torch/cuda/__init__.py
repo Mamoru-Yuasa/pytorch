@@ -1980,7 +1980,7 @@ def _compile_kernel(
         return getattr(result, mangled_name)
 
 
-from . import amp, jiterator, nvtx, profiler, sparse, tunable
+from . import amp, apu, jiterator, nvtx, profiler, sparse, tunable
 
 
 _POOL_HANDLE = NewType("_POOL_HANDLE", tuple[int, int])
@@ -2029,6 +2029,7 @@ __all__ = [
     "StreamContext",
     "GreenContext",
     "amp",
+    "apu",
     "caching_allocator_alloc",
     "caching_allocator_delete",
     "caching_allocator_disabled",

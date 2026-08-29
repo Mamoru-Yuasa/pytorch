@@ -206,6 +206,19 @@ bool CUDAHooks::hasROCM() const {
   return AT_ROCM_ENABLED();
 }
 
+bool CUDAHooks::isUnifiedMemoryDevice(DeviceIndex device_index) const {
+  return c10::cuda::CUDACachingAllocator::isUnifiedMemoryDevice(device_index);
+}
+
+c10::intrusive_ptr<c10::StorageImpl>
+CUDAHooks::maybeCreateUnifiedMemoryAlias(
+    const c10::Storage& source,
+    Device target,
+    bool non_blocking) const {
+  return c10::cuda::CUDACachingAllocator::maybeCreateUnifiedMemoryAlias(
+      source, target, non_blocking);
+}
+
 #if defined(USE_DIRECT_NVRTC)
 static std::pair<std::unique_ptr<at::DynamicLibrary>, at::cuda::NVRTC*> load_nvrtc() {
   return std::make_pair(nullptr, at::cuda::load_nvrtc());

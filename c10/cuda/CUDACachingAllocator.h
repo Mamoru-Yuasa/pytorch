@@ -20,6 +20,9 @@
 
 namespace c10 {
 
+struct Storage;
+struct StorageImpl;
+
 // Caching allocator will execute every registered callback if it unable to find
 // block inside of already allocated area.
 class C10_CUDA_API FreeMemoryCallback {
@@ -57,6 +60,16 @@ using c10::CachingDeviceAllocator::DeviceStats;
 using c10::CachingDeviceAllocator::RecordContext;
 using c10::CachingDeviceAllocator::SegmentInfo;
 using c10::CachingDeviceAllocator::TraceEntry;
+
+C10_CUDA_API bool isUnifiedMemoryDevice(DeviceIndex device);
+C10_CUDA_API intrusive_ptr<StorageImpl> maybeCreateUnifiedMemoryAlias(
+    const Storage& source,
+    Device target,
+    bool non_blocking);
+C10_CUDA_API bool isUnifiedMemoryAlias(const DataPtr& data_ptr);
+C10_CUDA_API bool recordUnifiedMemoryAliasStream(
+    const DataPtr& data_ptr,
+    CUDAStream stream);
 
 struct AllocatorState {
   virtual ~AllocatorState() = default;
@@ -355,6 +368,11 @@ inline void* getBaseAllocation(void* ptr, size_t* size) {
 }
 
 inline void recordStream(const DataPtr& dataPtr, CUDAStream stream) {
+#if defined(USE_ROCM)
+  if (recordUnifiedMemoryAliasStream(dataPtr, stream)) {
+    return;
+  }
+#endif
   get()->recordStream(dataPtr, stream);
 }
 
